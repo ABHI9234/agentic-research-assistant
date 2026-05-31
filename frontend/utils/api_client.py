@@ -1,13 +1,21 @@
 import httpx
 import os
 
-try:
-    import streamlit as st
-    _backend = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
-except Exception:
-    _backend = os.getenv("BACKEND_URL", "http://localhost:8000")
+# Try st.secrets first, then env var, then hardcoded Render URL
+def _get_backend_url():
+    try:
+        import streamlit as st
+        url = st.secrets.get("BACKEND_URL", "")
+        if url:
+            return url.rstrip("/")
+    except Exception:
+        pass
+    env_url = os.getenv("BACKEND_URL", "")
+    if env_url:
+        return env_url.rstrip("/")
+    return "https://agentic-research-assistant-8g0a.onrender.com"
 
-BASE_URL = _backend.rstrip("/") + "/api"
+BASE_URL = _get_backend_url() + "/api"
 TIMEOUT = 300.0
 
 
@@ -43,10 +51,10 @@ def upload_document(file_bytes: bytes, filename: str) -> dict:
             timeout=300.0,
         )
         if not r.text.strip():
-            return {"error": "Empty response from server — file may be too large or server timed out"}
+            return {"error": "Empty response — try a smaller PDF under 5MB"}
         return r.json()
     except httpx.ReadTimeout:
-        return {"error": "Upload timed out — try a smaller PDF (under 5MB)"}
+        return {"error": "Upload timed out — try a smaller PDF under 5MB"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -92,7 +100,7 @@ def run_research(
             return {"error": "Empty response — backend may have timed out"}
         return r.json()
     except httpx.ReadTimeout:
-        return {"error": "Query timed out — try a simpler question or vector-only strategy"}
+        return {"error": "Query timed out — try vector strategy instead of hybrid"}
     except Exception as e:
         return {"error": str(e)}
 
