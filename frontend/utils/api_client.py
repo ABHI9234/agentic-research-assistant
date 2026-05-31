@@ -1,7 +1,13 @@
 import httpx
 import os
 
-BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000") + "/api"
+try:
+    import streamlit as st
+    _backend = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
+except Exception:
+    _backend = os.getenv("BACKEND_URL", "http://localhost:8000")
+
+BASE_URL = _backend.rstrip("/") + "/api"
 TIMEOUT = 120.0
 
 
