@@ -27,3 +27,4 @@ markdown==3.6
 psutil==5.9.8
 groq==0.37.1
 pyvis==0.3.2
+ragas==0.1.14
