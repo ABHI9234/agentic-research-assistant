@@ -101,3 +101,11 @@ def traverse_graph(start_entity: str, depth: int = 2) -> dict:
         return r.json()
     except Exception as e:
         return {"nodes": [], "edges": [], "paths": []}
+
+
+def clear_all_data() -> dict:
+    try:
+        r = httpx.delete(f"{BASE_URL}/ingest/clear-all", timeout=30)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
