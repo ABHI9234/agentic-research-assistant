@@ -8,12 +8,12 @@ except Exception:
     _backend = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 BASE_URL = _backend.rstrip("/") + "/api"
-TIMEOUT = 120.0
+TIMEOUT = 300.0
 
 
 def get_health():
     try:
-        r = httpx.get(f"{BASE_URL}/health", timeout=5)
+        r = httpx.get(f"{BASE_URL}/health", timeout=10)
         return r.json()
     except Exception as e:
         return {"status": "unreachable", "error": str(e)}
@@ -21,7 +21,7 @@ def get_health():
 
 def get_detailed_health():
     try:
-        r = httpx.get(f"{BASE_URL}/health/detailed", timeout=10)
+        r = httpx.get(f"{BASE_URL}/health/detailed", timeout=15)
         return r.json()
     except Exception as e:
         return {"status": "unreachable", "error": str(e)}
@@ -29,7 +29,7 @@ def get_detailed_health():
 
 def get_metrics():
     try:
-        r = httpx.get(f"{BASE_URL}/metrics", timeout=5)
+        r = httpx.get(f"{BASE_URL}/metrics", timeout=10)
         return r.json()
     except Exception as e:
         return {"error": str(e)}
@@ -40,9 +40,13 @@ def upload_document(file_bytes: bytes, filename: str) -> dict:
         r = httpx.post(
             f"{BASE_URL}/ingest/upload",
             files={"file": (filename, file_bytes, "application/pdf")},
-            timeout=TIMEOUT,
+            timeout=300.0,
         )
+        if not r.text.strip():
+            return {"error": "Empty response from server — file may be too large or server timed out"}
         return r.json()
+    except httpx.ReadTimeout:
+        return {"error": "Upload timed out — try a smaller PDF (under 5MB)"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -82,9 +86,13 @@ def run_research(
                 "enable_reflection": enable_reflection,
                 "enable_critic": enable_critic,
             },
-            timeout=TIMEOUT,
+            timeout=300.0,
         )
+        if not r.text.strip():
+            return {"error": "Empty response — backend may have timed out"}
         return r.json()
+    except httpx.ReadTimeout:
+        return {"error": "Query timed out — try a simpler question or vector-only strategy"}
     except Exception as e:
         return {"error": str(e)}
 

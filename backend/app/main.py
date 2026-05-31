@@ -140,3 +140,14 @@ async def root():
         "docs": "/docs",
         "health": "/api/health",
     }
+
+
+# Preload embedding model on startup to avoid cold-start timeout on first upload
+@app.on_event("startup")
+async def preload_models():
+    try:
+        from backend.ingestion.embedder import get_embedding_model
+        get_embedding_model()
+        logger.info("Embedding model preloaded successfully.")
+    except Exception as e:
+        logger.warning(f"Could not preload embedding model: {e}")
