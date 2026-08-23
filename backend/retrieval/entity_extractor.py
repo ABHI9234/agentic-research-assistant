@@ -24,36 +24,51 @@ def get_groq_client():
 def extract_entities_from_text(text: str) -> dict:
     client = get_groq_client()
 
-    prompt = f"""Extract entities from this text. Return ONLY a JSON object. No explanation. No markdown. No code blocks. No thinking.
+    prompt = f"""You are an expert knowledge graph builder for enterprise technology documents.
 
-Text: {text[:600]}
+Extract ALL entities and relationships from the text below.
 
-Return exactly this format:
-{{"entities":[{{"name":"X","type":"CONCEPT","description":"brief"}}],"relationships":[{{"source":"X","target":"Y","type":"RELATED_TO"}}]}}
+Entity types to use: ORGANIZATION, PRODUCT, TECHNOLOGY, PERSON, CONCEPT, LOCATION
+Relationship types to use: DEVELOPS, ACQUIRES, USES, PART_OF, COMPETES_WITH, LEADS, RELATED_TO, POWERS, PROVIDES
 
-JSON:"""
+Text:
+{text[:600]}
+
+Return ONLY a raw JSON object. No markdown. No backticks. No explanation.
+Use this exact structure:
+{{"entities":[{{"name":"Cisco Systems","type":"ORGANIZATION","description":"Networking hardware and software company"}},{{"name":"IOS","type":"TECHNOLOGY","description":"Operating system powering Cisco routers"}}],"relationships":[{{"source":"Cisco Systems","target":"IOS","type":"DEVELOPS"}}]}}"""
 
     try:
-        response = client.chat.completions.create(
+        response = get_groq_client().chat.completions.create(
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=400,
+            max_tokens=600,
         )
         raw = response.choices[0].message.content.strip()
 
-        # Strip thinking tags if present
+        # Strip thinking tags
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
 
-        # Strip markdown code blocks
+        # Strip markdown backticks
         raw = re.sub(r'```json|```', '', raw).strip()
 
-        # Find JSON object in response
+        # Fix trailing commas
+        raw = re.sub(r',\s*([}\]])', r'\1', raw)
+
+        # Extract JSON object
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if match:
             raw = match.group(0)
 
         parsed = json.loads(raw)
+
+        if "entities" not in parsed:
+            parsed["entities"] = []
+        if "relationships" not in parsed:
+            parsed["relationships"] = []
+
+        logger.info(f"Extracted {len(parsed['entities'])} entities, {len(parsed['relationships'])} relationships")
         return parsed
 
     except Exception as e:
