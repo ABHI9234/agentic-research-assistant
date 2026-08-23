@@ -52,7 +52,8 @@ Use this exact structure:
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=1200,
+            max_tokens=2000,
+            reasoning_effort="low",
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
