@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     backend_url: str = Field(default="http://localhost:8000", alias="BACKEND_URL")
 
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "qwen/qwen3.6-27b"
     groq_temperature: float = 0.0
     groq_max_tokens: int = 1024
 
