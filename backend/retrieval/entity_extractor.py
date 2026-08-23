@@ -128,7 +128,7 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
     total_entities = 0
     total_relationships = 0
     chunks_processed = 0
-    MAX_CHUNKS = 10
+    MAX_CHUNKS = 100
 
     try:
         for chunk in stream_chunks(filepath):

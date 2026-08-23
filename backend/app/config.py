@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     backend_url: str = Field(default="http://localhost:8000", alias="BACKEND_URL")
 
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
-    groq_model: str = Field(default="openai/gpt-oss-120b", alias="GROQ_MODEL")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    groq_model: str = Field(default="groq/compound-mini", alias="GROQ_MODEL")
     groq_temperature: float = 0.0
     groq_max_tokens: int = 4096
 
