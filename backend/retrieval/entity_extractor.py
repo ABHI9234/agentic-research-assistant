@@ -1,5 +1,5 @@
 import asyncio
-from typing import Generator
+from typing import List
 from loguru import logger
 from groq import Groq
 from neo4j import GraphDatabase
@@ -9,6 +9,10 @@ import re
 from backend.app.config import get_settings
 
 settings = get_settings()
+
+BATCH_SIZE = 4
+CONCURRENCY = 2
+MAX_CHUNKS = 100
 
 
 def get_neo4j_driver():
@@ -22,29 +26,33 @@ def get_groq_client():
     return Groq(api_key=settings.groq_api_key)
 
 
-def extract_entities_from_text(text: str) -> dict:
+def extract_entities_from_batch(chunks: List[dict]) -> dict:
     client = get_groq_client()
 
-    prompt = f"""You are an expert knowledge graph builder for enterprise technology documents.
+    labeled_text = "\n\n".join(
+        f"[Chunk {i+1}]\n{c['text'][:500]}" for i, c in enumerate(chunks)
+    )
 
-Extract ALL entities and relationships from the text below.
+    prompt = f"""You are an expert knowledge graph builder for enterprise technology and HR documents.
 
-Entity types to use: ORGANIZATION, PRODUCT, TECHNOLOGY, PERSON, CONCEPT, LOCATION
-Relationship types to use: DEVELOPS, ACQUIRES, USES, PART_OF, COMPETES_WITH, LEADS, RELATED_TO, POWERS, PROVIDES
+Extract ALL entities and relationships from the labeled chunks below.
+Entity types to use: ORGANIZATION, PRODUCT, TECHNOLOGY, PERSON, CONCEPT, LOCATION, ROLE, SKILL
+Relationship types to use: DEVELOPS, ACQUIRES, USES, PART_OF, COMPETES_WITH, LEADS, RELATED_TO, POWERS, PROVIDES, REQUIRES
 
-Text:
-{text[:600]}
+Each entity MUST include "chunk_index" — the number of the [Chunk N] label it was found in.
+
+{labeled_text}
 
 Return ONLY a raw JSON object. No markdown. No backticks. No explanation.
 Use this exact structure:
-{{"entities":[{{"name":"Cisco Systems","type":"ORGANIZATION","description":"Networking hardware and software company"}},{{"name":"IOS","type":"TECHNOLOGY","description":"Operating system powering Cisco routers"}}],"relationships":[{{"source":"Cisco Systems","target":"IOS","type":"DEVELOPS"}}]}}"""
+{{"entities":[{{"name":"Cisco Systems","type":"ORGANIZATION","description":"Networking hardware and software company","chunk_index":1}}],"relationships":[{{"source":"Cisco Systems","target":"IOS","type":"DEVELOPS"}}]}}"""
 
     try:
         response = client.chat.completions.create(
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=1200,
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
@@ -60,18 +68,14 @@ Use this exact structure:
             parsed["entities"] = []
         if "relationships" not in parsed:
             parsed["relationships"] = []
-
         return parsed
 
     except Exception as e:
-        logger.warning(f"Entity extraction failed for a chunk: {e}")
+        logger.exception(f"Batch entity extraction failed: {e}")
         return {"entities": [], "relationships": []}
 
 
-def store_in_neo4j(doc_id, filename, chunk_id, chunk_text, page_num, extracted, driver):
-    entities = extracted.get("entities", [])
-    relationships = extracted.get("relationships", [])
-
+def ensure_chunk_node(doc_id, filename, chunk_id, chunk_text, page_num, driver):
     with driver.session() as session:
         session.run(
             "MERGE (d:Document {doc_id: $doc_id}) ON CREATE SET d.filename = $filename",
@@ -84,6 +88,10 @@ def store_in_neo4j(doc_id, filename, chunk_id, chunk_text, page_num, extracted, 
                MERGE (c)-[:BELONGS_TO]->(d)""",
             chunk_id=chunk_id, text=chunk_text[:300], page_num=page_num, doc_id=doc_id,
         )
+
+
+def store_entities_for_chunk(entities, chunk_id, driver):
+    with driver.session() as session:
         for entity in entities:
             name = entity.get("name", "").strip()
             if not name:
@@ -96,6 +104,10 @@ def store_in_neo4j(doc_id, filename, chunk_id, chunk_text, page_num, extracted, 
                 name=name, type=entity.get("type", "CONCEPT"),
                 description=entity.get("description", ""), chunk_id=chunk_id,
             )
+
+
+def store_relationships(relationships, driver):
+    with driver.session() as session:
         for rel in relationships:
             source = rel.get("source", "").strip()
             target = rel.get("target", "").strip()
@@ -110,8 +122,6 @@ def store_in_neo4j(doc_id, filename, chunk_id, chunk_text, page_num, extracted, 
             except Exception as e:
                 logger.warning(f"Rel store failed: {e}")
 
-    return len(entities), len(relationships)
-
 
 async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
     from backend.ingestion.chunker import stream_chunks
@@ -119,8 +129,6 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
     driver = get_neo4j_driver()
     total_entities = 0
     total_relationships = 0
-    MAX_CHUNKS = 100
-    CONCURRENCY = 5
 
     chunks = []
     for chunk in stream_chunks(filepath):
@@ -128,30 +136,45 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
             break
         chunks.append(chunk)
 
-    logger.info(f"[{job_id}] Extracting entities for {len(chunks)} chunks with concurrency={CONCURRENCY}")
+    batches = [chunks[i:i + BATCH_SIZE] for i in range(0, len(chunks), BATCH_SIZE)]
+    logger.info(f"[{job_id}] {len(chunks)} chunks -> {len(batches)} batches, concurrency={CONCURRENCY}")
 
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    async def process_chunk(chunk):
+    async def process_batch(batch):
         async with semaphore:
-            extracted = await asyncio.to_thread(extract_entities_from_text, chunk["text"])
-            return chunk, extracted
+            extracted = await asyncio.to_thread(extract_entities_from_batch, batch)
+            return batch, extracted
 
-    results = await asyncio.gather(*[process_chunk(c) for c in chunks])
+    results = await asyncio.gather(*[process_batch(b) for b in batches])
 
     try:
-        for chunk, extracted in results:
-            ents, rels = store_in_neo4j(
-                doc_id=chunk["doc_id"],
-                filename=chunk["filename"],
-                chunk_id=chunk["chunk_id"],
-                chunk_text=chunk["text"],
-                page_num=chunk["page_num"],
-                extracted=extracted,
-                driver=driver,
-            )
-            total_entities += ents
-            total_relationships += rels
+        for batch, _ in results:
+            for chunk in batch:
+                ensure_chunk_node(
+                    doc_id=chunk["doc_id"], filename=chunk["filename"],
+                    chunk_id=chunk["chunk_id"], chunk_text=chunk["text"],
+                    page_num=chunk["page_num"], driver=driver,
+                )
+
+        for batch, extracted in results:
+            entities = extracted.get("entities", [])
+            relationships = extracted.get("relationships", [])
+
+            by_chunk_index = {}
+            for e in entities:
+                idx = e.get("chunk_index", 1)
+                by_chunk_index.setdefault(idx, []).append(e)
+
+            for idx, batch_entities in by_chunk_index.items():
+                pos = idx - 1
+                if 0 <= pos < len(batch):
+                    chunk_id = batch[pos]["chunk_id"]
+                    store_entities_for_chunk(batch_entities, chunk_id, driver)
+                    total_entities += len(batch_entities)
+
+            store_relationships(relationships, driver)
+            total_relationships += len(relationships)
     finally:
         driver.close()
 
