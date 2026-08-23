@@ -1,3 +1,4 @@
+import asyncio
 from typing import Generator
 from loguru import logger
 from groq import Groq
@@ -39,40 +40,31 @@ Use this exact structure:
 {{"entities":[{{"name":"Cisco Systems","type":"ORGANIZATION","description":"Networking hardware and software company"}},{{"name":"IOS","type":"TECHNOLOGY","description":"Operating system powering Cisco routers"}}],"relationships":[{{"source":"Cisco Systems","target":"IOS","type":"DEVELOPS"}}]}}"""
 
     try:
-        response = get_groq_client().chat.completions.create(
+        response = client.chat.completions.create(
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=600,
         )
         raw = response.choices[0].message.content.strip()
-
-        # Strip thinking tags
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-
-        # Strip markdown backticks
         raw = re.sub(r'```json|```', '', raw).strip()
-
-        # Fix trailing commas
         raw = re.sub(r',\s*([}\]])', r'\1', raw)
 
-        # Extract JSON object
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if match:
             raw = match.group(0)
 
         parsed = json.loads(raw)
-
         if "entities" not in parsed:
             parsed["entities"] = []
         if "relationships" not in parsed:
             parsed["relationships"] = []
 
-        logger.info(f"Extracted {len(parsed['entities'])} entities, {len(parsed['relationships'])} relationships")
         return parsed
 
     except Exception as e:
-        logger.warning(f"Entity extraction failed: {e}")
+        logger.warning(f"Entity extraction failed for a chunk: {e}")
         return {"entities": [], "relationships": []}
 
 
@@ -127,14 +119,28 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
     driver = get_neo4j_driver()
     total_entities = 0
     total_relationships = 0
-    chunks_processed = 0
     MAX_CHUNKS = 100
+    CONCURRENCY = 5
+
+    chunks = []
+    for chunk in stream_chunks(filepath):
+        if len(chunks) >= MAX_CHUNKS:
+            break
+        chunks.append(chunk)
+
+    logger.info(f"[{job_id}] Extracting entities for {len(chunks)} chunks with concurrency={CONCURRENCY}")
+
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+
+    async def process_chunk(chunk):
+        async with semaphore:
+            extracted = await asyncio.to_thread(extract_entities_from_text, chunk["text"])
+            return chunk, extracted
+
+    results = await asyncio.gather(*[process_chunk(c) for c in chunks])
 
     try:
-        for chunk in stream_chunks(filepath):
-            if chunks_processed >= MAX_CHUNKS:
-                break
-            extracted = extract_entities_from_text(chunk["text"])
+        for chunk, extracted in results:
             ents, rels = store_in_neo4j(
                 doc_id=chunk["doc_id"],
                 filename=chunk["filename"],
@@ -146,7 +152,6 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
             )
             total_entities += ents
             total_relationships += rels
-            chunks_processed += 1
     finally:
         driver.close()
 
