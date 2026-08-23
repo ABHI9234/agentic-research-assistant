@@ -24,26 +24,38 @@ def get_groq_client():
 def extract_entities_from_text(text: str) -> dict:
     client = get_groq_client()
 
-    # Very short prompt — minimizes tokens used per chunk
-    prompt = f"""Extract up to 5 entities and 3 relationships from this text.
-Return ONLY valid JSON, no markdown, no explanation.
-
-{{"entities":[{{"name":"X","type":"PERSON|ORG|CONCEPT|TECHNOLOGY","description":"brief"}}],"relationships":[{{"source":"X","target":"Y","type":"RELATED_TO"}}]}}
+    prompt = f"""Extract entities from this text. Return ONLY a JSON object. No explanation. No markdown. No code blocks. No thinking.
 
 Text: {text[:600]}
+
+Return exactly this format:
+{{"entities":[{{"name":"X","type":"CONCEPT","description":"brief"}}],"relationships":[{{"source":"X","target":"Y","type":"RELATED_TO"}}]}}
 
 JSON:"""
 
     try:
-        response = get_groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+        response = client.chat.completions.create(
+            model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=300,
+            max_tokens=400,
         )
         raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+
+        # Strip thinking tags if present
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+
+        # Strip markdown code blocks
+        raw = re.sub(r'```json|```', '', raw).strip()
+
+        # Find JSON object in response
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            raw = match.group(0)
+
+        parsed = json.loads(raw)
+        return parsed
+
     except Exception as e:
         logger.warning(f"Entity extraction failed: {e}")
         return {"entities": [], "relationships": []}
@@ -101,14 +113,11 @@ async def extract_and_store_entities(filepath: str, job_id: str) -> dict:
     total_entities = 0
     total_relationships = 0
     chunks_processed = 0
-
-    # Cap at 10 chunks per doc — ~3000 tokens total, well within daily limit
     MAX_CHUNKS = 10
 
     try:
         for chunk in stream_chunks(filepath):
             if chunks_processed >= MAX_CHUNKS:
-                logger.info(f"[{job_id}] Entity extraction capped at {MAX_CHUNKS} chunks")
                 break
             extracted = extract_entities_from_text(chunk["text"])
             ents, rels = store_in_neo4j(
