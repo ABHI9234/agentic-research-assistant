@@ -1,6 +1,7 @@
 from typing import List, Dict
 from loguru import logger
 from groq import Groq
+import re
 from backend.app.config import get_settings
 
 settings = get_settings()
@@ -10,11 +11,17 @@ def get_groq_client():
     return Groq(api_key=settings.groq_api_key)
 
 
+def _extract_score(raw: str) -> float:
+    """Pull the first float found in the response, robust to reasoning leakage."""
+    if not raw:
+        raise ValueError("empty response")
+    match = re.search(r'(\d*\.?\d+)', raw.strip())
+    if not match:
+        raise ValueError(f"no number found in: {raw!r}")
+    return float(match.group(1))
+
+
 def score_faithfulness(answer: str, contexts: List[str]) -> float:
-    """
-    Measures whether the answer is grounded in the retrieved contexts.
-    Score: 0.0 (hallucinated) to 1.0 (fully grounded)
-    """
     client = get_groq_client()
     context_text = "\n\n".join(contexts[:3])
 
@@ -37,20 +44,16 @@ Return ONLY a number between 0.0 and 1.0. Nothing else."""
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=10,
+            max_tokens=200,
+            reasoning_effort="low",
         )
-        score = float(response.choices[0].message.content.strip())
-        return round(min(max(score, 0.0), 1.0), 3)
+        return round(min(max(_extract_score(response.choices[0].message.content), 0.0), 1.0), 3)
     except Exception as e:
         logger.warning(f"Faithfulness scoring failed: {e}")
         return 0.0
 
 
 def score_answer_relevancy(question: str, answer: str) -> float:
-    """
-    Measures how relevant the answer is to the question.
-    Score: 0.0 to 1.0
-    """
     client = get_groq_client()
 
     prompt = f"""You are an evaluation judge. Score how relevant the answer is to the question.
@@ -70,20 +73,16 @@ Return ONLY a number between 0.0 and 1.0. Nothing else."""
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=10,
+            max_tokens=200,
+            reasoning_effort="low",
         )
-        score = float(response.choices[0].message.content.strip())
-        return round(min(max(score, 0.0), 1.0), 3)
+        return round(min(max(_extract_score(response.choices[0].message.content), 0.0), 1.0), 3)
     except Exception as e:
         logger.warning(f"Answer relevancy scoring failed: {e}")
         return 0.0
 
 
 def score_context_precision(question: str, contexts: List[str]) -> float:
-    """
-    Measures what fraction of retrieved contexts are relevant to the question.
-    Score: 0.0 to 1.0
-    """
     if not contexts:
         return 0.0
 
@@ -103,22 +102,19 @@ Answer with only YES or NO."""
                 model=settings.groq_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=5,
+                max_tokens=100,
+                reasoning_effort="low",
             )
-            answer = response.choices[0].message.content.strip().upper()
+            answer = (response.choices[0].message.content or "").strip().upper()
             if "YES" in answer:
                 relevant += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Context precision check failed: {e}")
 
     return round(relevant / len(contexts[:5]), 3)
 
 
 def score_context_recall(question: str, answer: str, contexts: List[str]) -> float:
-    """
-    Measures how much of the answer can be attributed to the retrieved contexts.
-    Score: 0.0 to 1.0
-    """
     client = get_groq_client()
     context_text = "\n\n".join(contexts[:3])
 
@@ -139,22 +135,16 @@ Return ONLY a number between 0.0 and 1.0. Nothing else."""
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=10,
+            max_tokens=200,
+            reasoning_effort="low",
         )
-        score = float(response.choices[0].message.content.strip())
-        return round(min(max(score, 0.0), 1.0), 3)
+        return round(min(max(_extract_score(response.choices[0].message.content), 0.0), 1.0), 3)
     except Exception as e:
         logger.warning(f"Context recall scoring failed: {e}")
         return 0.0
 
 
-async def evaluate_single_question(
-    question: str,
-    strategy: str,
-) -> Dict:
-    """
-    Runs a full research query and scores it with all 4 RAGAS metrics.
-    """
+async def evaluate_single_question(question: str, strategy: str) -> Dict:
     from backend.app.schemas.query_schemas import ResearchRequest, RetrievalStrategy
     from backend.app.services.retrieval_service import run_research_query
 
@@ -202,14 +192,7 @@ async def evaluate_single_question(
         }
 
 
-async def run_evaluation(
-    questions: List[str],
-    strategies: List[str],
-) -> List[Dict]:
-    """
-    Main entry point called by the eval router.
-    Runs all questions across all strategies and returns averaged metrics.
-    """
+async def run_evaluation(questions: List[str], strategies: List[str]) -> List[Dict]:
     strategy_results = {}
 
     for strategy in strategies:
